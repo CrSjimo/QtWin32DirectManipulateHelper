@@ -10,3 +10,5 @@ macro(qwdmh_add_example _target)
 endmacro()
 
 add_subdirectory(qwdmh)
+
+add_subdirectory(quick)
