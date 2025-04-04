@@ -1,0 +1,16 @@
+#ifndef QWDMH_QWDMHCOREGLOBAL_H
+#define QWDMH_QWDMHCOREGLOBAL_H
+
+#ifndef QWDMH_CORE_EXPORT
+#  ifdef QWDMH_CORE_STATIC
+#    define QWDMH_CORE_EXPORT
+#  else
+#    ifdef QWDMH_CORE_LIBRARY
+#      define QWDMH_CORE_EXPORT Q_DECL_EXPORT
+#    else
+#      define QWDMH_CORE_EXPORT Q_DECL_IMPORT
+#    endif
+#  endif
+#endif
+
+#endif //QWDMH_QWDMHCOREGLOBAL_H
