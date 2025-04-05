@@ -5,6 +5,8 @@
 #include <QWindow>
 #include <QtEvents>
 #include <QPointer>
+#include <QTimer>
+#include <utility>
 
 namespace QWDMH {
 
@@ -12,7 +14,12 @@ namespace QWDMH {
 
     class DirectManipulationSystemEventHandler : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IDirectManipulationViewportEventHandler> {
     public:
-        explicit DirectManipulationSystemEventHandler(QWindow *window) : m_window(window) {}
+        explicit DirectManipulationSystemEventHandler(QWindow *window, Microsoft::WRL::ComPtr<IDirectManipulationUpdateManager> updateManager) : m_window(window), m_updateManager(std::move(updateManager)) {
+            m_inertiaTimer.setInterval(0);
+            m_inertiaTimer.callOnTimeout([=] {
+                m_updateManager->Update(nullptr);
+            });
+        }
 
         STDMETHODIMP OnContentUpdated(IDirectManipulationViewport*, IDirectManipulationContent* content) override {
             float matrix[6];
@@ -47,11 +54,15 @@ namespace QWDMH {
         }
         STDMETHODIMP OnViewportStatusChanged(IDirectManipulationViewport* viewport, DIRECTMANIPULATION_STATUS current, DIRECTMANIPULATION_STATUS previous) override {
             if (current == DIRECTMANIPULATION_RUNNING) {
+                m_inertiaTimer.stop();
                 auto pos = QCursor::pos();
                 auto localPos = m_window->mapFromGlobal(pos);
                 auto event = new QNativeGestureEvent(Qt::BeginNativeGesture, QPointingDevice::primaryPointingDevice(), 2, localPos, localPos, pos, 0, {0, 0});
                 QCoreApplication::sendEvent(m_window, event);
+            } else if (current == DIRECTMANIPULATION_INERTIA) {
+                m_inertiaTimer.start();
             } else if (current == DIRECTMANIPULATION_READY) {
+                m_inertiaTimer.stop();
                 IDirectManipulationContent *content;
                 viewport->GetPrimaryContent(IID_PPV_ARGS(&content));
                 float matrix[] = {1, 0, 0, 1, 0, 0};
@@ -69,6 +80,8 @@ namespace QWDMH {
 
     private:
         QPointer<QWindow> m_window;
+        Microsoft::WRL::ComPtr<IDirectManipulationUpdateManager> m_updateManager;
+        QTimer m_inertiaTimer;
         float previousScale = 1;
         float previousTX = 0;
         float previousTY = 0;
@@ -114,6 +127,10 @@ namespace QWDMH {
     }
 
     void DirectManipulationSystem::registerWindow(QWindow* window) {
+        registerWindow(window, TranslationX | TranslationY | Scaling | TranslationInertia | ScalingInertia);
+    }
+
+    void DirectManipulationSystem::registerWindow(QWindow* window, Configuration configuration) {
         Q_ASSERT(m_instance);
         auto d = m_instance->d_func();
         auto hwnd = reinterpret_cast<HWND>(window->winId());
@@ -130,17 +147,13 @@ namespace QWDMH {
 
         context.manager->GetUpdateManager(IID_PPV_ARGS(&context.updateManager));
 
-        context.viewport->ActivateConfiguration(
-            DIRECTMANIPULATION_CONFIGURATION_INTERACTION |
-            DIRECTMANIPULATION_CONFIGURATION_SCALING |
-            DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_X |
-            DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_Y);
+        context.viewport->ActivateConfiguration(DIRECTMANIPULATION_CONFIGURATION_INTERACTION | static_cast<DIRECTMANIPULATION_CONFIGURATION>(configuration.toInt()));
 
         RECT rc;
         GetClientRect(hwnd, &rc);
         context.viewport->SetViewportRect(&rc);
 
-        auto handler = Microsoft::WRL::Make<DirectManipulationSystemEventHandler>(window);
+        auto handler = Microsoft::WRL::Make<DirectManipulationSystemEventHandler>(window, context.updateManager);
         context.viewport->AddEventHandler(hwnd, handler.Get(), &context.eventCookie);
         context.viewport->Enable();
 
