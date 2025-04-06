@@ -29,10 +29,21 @@ namespace QWDMH {
         };
         Q_DECLARE_FLAGS(Configuration, ConfigurationFlags)
 
+        enum DeviceTypeFlags {
+            None = 0x0,
+            Touchpad = 0x1,
+            Pen = 0x2,
+            Touch = 0x4,
+            Wheel = 0x8,
+            All = Touchpad | Pen | Touch | Wheel,
+        };
+        Q_DECLARE_FLAGS(DeviceType, DeviceTypeFlags)
+
         static DirectManipulationSystem *instance();
         static void registerWindow(QWindow *window);
-        static void registerWindow(QWindow *window, Configuration configuration);
+        static void registerWindow(QWindow *window, Configuration configuration, DeviceType deviceType);
         static void unregisterWindow(QWindow *window);
+        static bool processNativeMessageManually(void *message);
 
     private:
         QScopedPointer<DirectManipulationSystemPrivate> d_ptr;
@@ -41,5 +52,6 @@ namespace QWDMH {
 }
 
 Q_DECLARE_OPERATORS_FOR_FLAGS(QWDMH::DirectManipulationSystem::Configuration)
+Q_DECLARE_OPERATORS_FOR_FLAGS(QWDMH::DirectManipulationSystem::DeviceType)
 
 #endif //QWDMH_DIRECTMANIPULATIONSYSTEM_H

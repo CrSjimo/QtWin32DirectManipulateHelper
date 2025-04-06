@@ -1,7 +1,7 @@
 #include "DirectManipulationSystem.h"
 #include "DirectManipulationSystem_p.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QWindow>
 #include <QtEvents>
 #include <QPointer>
@@ -21,20 +21,40 @@ namespace QWDMH {
             });
         }
 
+        inline void sendZoomEvent(float scale) const {
+            auto pos = QCursor::pos();
+            auto localPos = m_window->mapFromGlobal(pos);
+            auto event = new QNativeGestureEvent(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2, localPos, localPos, pos, scale / previousScale - 1, {0, 0});
+            QCoreApplication::sendEvent(m_window, event);
+        }
+
+        inline void sendWheelEvent(int dx, int dy) const {
+            auto pos = QCursor::pos();
+            auto localPos = m_window->mapFromGlobal(pos);
+            auto modifiers = QGuiApplication::queryKeyboardModifiers();
+            QPoint delta = {dx, dy};
+            if (modifiers & Qt::AltModifier) {
+                delta = delta.transposed();
+            }
+            auto event = new QWheelEvent(localPos, pos, delta, delta, QGuiApplication::mouseButtons(), modifiers, Qt::ScrollUpdate, false);
+            QCoreApplication::sendEvent(m_window, event);
+        }
+
         STDMETHODIMP OnContentUpdated(IDirectManipulationViewport*, IDirectManipulationContent* content) override {
             float matrix[6];
             if (SUCCEEDED(content->GetContentTransform(matrix, 6))) {
                 float scale = matrix[0];
                 float tx = matrix[4];
                 float ty = matrix[5];
-                auto pos = QCursor::pos();
-                auto localPos = m_window->mapFromGlobal(pos);
+
                 if (!qFuzzyCompare(scale, previousScale)) {
-                    auto event = new QNativeGestureEvent(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2, localPos, localPos, pos, scale / previousScale - 1, {0, 0});
-                    QCoreApplication::sendEvent(m_window, event);
+                    sendZoomEvent(scale);
                 } else {
-                    auto event = new QWheelEvent(localPos, pos, {static_cast<int>(tx - previousTX), static_cast<int>(ty - previousTY)}, {static_cast<int>(tx - previousTX), static_cast<int>(ty - previousTY)}, Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, false);
-                    QCoreApplication::sendEvent(m_window, event);
+                    auto dx = std::round(tx - previousTX);
+                    auto dy = std::round(ty - previousTY);
+                    tx = dx + previousTX;
+                    ty = dy + previousTY;
+                    sendWheelEvent(dx, dy);
                 }
                 previousScale = scale;
                 previousTX = tx;
@@ -89,11 +109,8 @@ namespace QWDMH {
 
     bool DirectManipulationSystemPrivate::EventFilter::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) {
         auto msg = static_cast<MSG*>(message);
-        if (msg->message == DM_POINTERHITTEST) {
-            HWND hwnd = msg->hwnd;
-            UINT32 pointerId = GET_POINTERID_WPARAM(msg->wParam);
-            handleContact(hwnd, pointerId);
-            return true;
+        if (shouldProcessMessage(msg)) {
+            return DirectManipulationSystem::processNativeMessageManually(msg);
         }
         return false;
     }
@@ -102,12 +119,24 @@ namespace QWDMH {
         return m_instance ? m_instance->d_func() : nullptr;
     }
 
-    void DirectManipulationSystemPrivate::handleContact(HWND hwnd, UINT32 pointerId) {
-        if (m_instance->d_func()->contexts.contains(hwnd)) {
-            auto context = m_instance->d_func()->contexts.value(hwnd);
-            context.viewport->SetContact(pointerId);
-            context.updateManager->Update(nullptr);
+    bool DirectManipulationSystemPrivate::shouldProcessMessage(MSG* msg) {
+        auto d = m_instance->d_func();
+        if (!d->contexts.contains(msg->hwnd))
+            return false;
+        auto context = d->contexts.value(msg->hwnd);
+        if ((msg->message == WM_MOUSEWHEEL || msg->message == WM_MOUSEHWHEEL) && context.deviceType & DirectManipulationSystem::Wheel)
+            return true;
+        if (msg->message == WM_POINTERUPDATE || msg->message == DM_POINTERHITTEST) {
+            UINT32 pointerId = GET_POINTERID_WPARAM(msg->wParam);
+            POINTER_INFO info{};
+            if (!GetPointerInfo(pointerId, &info))
+                return false;
+            return
+                info.pointerType == PT_TOUCHPAD && context.deviceType & DirectManipulationSystem::Touchpad ||
+                info.pointerType == PT_PEN && context.deviceType & DirectManipulationSystem::Pen ||
+                info.pointerType == PT_TOUCH && context.deviceType & DirectManipulationSystem::Touch;
         }
+        return false;
     }
 
     DirectManipulationSystem::DirectManipulationSystem(QObject* parent) : QObject(parent), d_ptr(new DirectManipulationSystemPrivate) {
@@ -127,16 +156,16 @@ namespace QWDMH {
     }
 
     void DirectManipulationSystem::registerWindow(QWindow* window) {
-        registerWindow(window, TranslationX | TranslationY | Scaling | TranslationInertia | ScalingInertia);
+        registerWindow(window, TranslationX | TranslationY | Scaling | TranslationInertia | ScalingInertia, All);
     }
 
-    void DirectManipulationSystem::registerWindow(QWindow* window, Configuration configuration) {
+    void DirectManipulationSystem::registerWindow(QWindow* window, Configuration configuration, DeviceType deviceType) {
         Q_ASSERT(m_instance);
         auto d = m_instance->d_func();
         auto hwnd = reinterpret_cast<HWND>(window->winId());
         if (d->contexts.contains(hwnd)) return;
 
-        DirectManipulationSystemPrivate::ViewportContext context;
+        DirectManipulationSystemPrivate::ViewportContext context{.deviceType = deviceType};
 
         if (FAILED(CoCreateInstance(CLSID_DirectManipulationManager, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&context.manager))))
             return;
@@ -176,5 +205,43 @@ namespace QWDMH {
         context.viewport->Disable();
         d->contexts.remove(hwnd);
         d->winIds.remove(window);
+    }
+
+    bool DirectManipulationSystem::processNativeMessageManually(void *message) {
+        Q_ASSERT(m_instance);
+        auto d = m_instance->d_func();
+        auto msg = static_cast<MSG*>(message);
+        HWND hwnd = msg->hwnd;
+        UINT32 pointerId;
+        BOOL fHandled = FALSE;
+        switch (msg->message) {
+            case WM_POINTERUPDATE:
+            case DM_POINTERHITTEST:
+                pointerId = GET_POINTERID_WPARAM(msg->wParam);
+                if (d->contexts.contains(hwnd)) {
+                    auto context = d->contexts.value(hwnd);
+                    context.viewport->SetContact(pointerId);
+                    context.updateManager->Update(nullptr);
+                    return true;
+                }
+                break;
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+                pointerId = DIRECTMANIPULATION_MOUSEFOCUS;
+                if (d->contexts.contains(hwnd)) {
+                    auto context = m_instance->d_func()->contexts.value(hwnd);
+                    context.viewport->SetContact(pointerId);
+                    MSG msg_ = *msg;
+                    msg_.wParam &= 0xffff0000;
+                    context.manager->ProcessInput(&msg_, &fHandled);
+                    context.viewport->ReleaseContact(pointerId);
+                    context.updateManager->Update(nullptr);
+                    return true;
+                }
+                break;
+            default:
+                break;
+        }
+        return false;
     }
 }

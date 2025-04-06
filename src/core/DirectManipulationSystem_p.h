@@ -22,6 +22,7 @@ namespace QWDMH{
             Microsoft::WRL::ComPtr<IDirectManipulationUpdateManager> updateManager;
             Microsoft::WRL::ComPtr<IDirectManipulationManager> manager;
             DWORD eventCookie = 0;
+            DirectManipulationSystem::DeviceType deviceType;
         };
 
         class EventFilter : public QAbstractNativeEventFilter {
@@ -33,7 +34,7 @@ namespace QWDMH{
         QHash<HWND, ViewportContext> contexts;
 
         static DirectManipulationSystemPrivate *instance();
-        static void handleContact(HWND hwnd, UINT32 pointerId);
+        static bool shouldProcessMessage(MSG *msg);
 
     };
 }
